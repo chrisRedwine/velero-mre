@@ -14,6 +14,14 @@ terraform {
       source  = "alekc/kubectl"
       version = ">= 2.0"
     }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.32"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = ">= 0.12"
+    }
   }
 }
 
@@ -43,6 +51,23 @@ provider "kubectl" {
     command     = "aws"
     args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", local.region]
   }
+}
+
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = local.cluster_ca_certificate
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", local.region]
+  }
+}
+
+provider "time" {}
+
+variable "use_fixed_velero_policy" {
+  description = "Whether to use the corrected IAM policy for Velero"
+  type        = bool
 }
 
 data "aws_availability_zones" "available" {}
@@ -230,13 +255,36 @@ module "velero_backup_s3_bucket" {
   tags = local.tags
 }
 
-module "velero_irsa" {
+module "velero_irsa_broken" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "5.44.0"
 
+  count = var.use_fixed_velero_policy ? 0 : 1
+
   create_role = true
 
-  role_name             = "velero-irsa-${local.name}"
+  role_name             = "velero-irsa-${local.name}-broken"
+  attach_velero_policy  = true
+  velero_s3_bucket_arns = [module.velero_backup_s3_bucket.s3_bucket_arn]
+
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["velero:velero-server"]
+    }
+  }
+
+  tags = local.tags
+}
+
+module "velero_irsa_fixed" {
+  source  = "git@github.com:chrisRedwine/terraform-aws-iam.git//modules/iam-role-for-service-accounts-eks?depth=1&ref=master"
+
+  count = var.use_fixed_velero_policy ? 1 : 0
+
+  create_role = true
+
+  role_name             = "velero-irsa-${local.name}-fixed"
   attach_velero_policy  = true
   velero_s3_bucket_arns = [module.velero_backup_s3_bucket.s3_bucket_arn]
 
@@ -281,8 +329,47 @@ resource "helm_release" "velero" {
       region       = local.region,
       bucket       = module.velero_backup_s3_bucket.s3_bucket_id,
       tagging      = join("&", [for key, value in local.tags : "${key}=${value}"]),
-      iam_role_arn = module.velero_irsa.iam_role_arn,
+      iam_role_arn = var.use_fixed_velero_policy ? module.velero_irsa_fixed[0].iam_role_arn : module.velero_irsa_broken[0].iam_role_arn,
   })]
+
+  wait = true
+}
+
+# Restart Velero pods to apply the new IRSA policy
+resource "time_static" "restarted_at" {
+  triggers = {
+    velero_irsa = var.use_fixed_velero_policy
+  }
+}
+
+resource "kubernetes_annotations" "velero_restart" {
+  depends_on = [helm_release.velero]
+
+  api_version = "apps/v1"
+  kind        = "Deployment"
+  metadata {
+    name = "velero"
+    namespace = "velero"
+  }
+  template_annotations = {
+    "kubectl.kubernetes.io/restartedAt" = time_static.restarted_at.rfc3339
+  }
+  force = true
+}
+
+resource "kubernetes_annotations" "velero_node_agent_restart" {
+  depends_on = [helm_release.velero]
+
+  api_version = "apps/v1"
+  kind        = "DaemonSet"
+  metadata {
+    name = "node-agent"
+    namespace = "velero"
+  }
+  template_annotations = {
+    "kubectl.kubernetes.io/restartedAt" = time_static.restarted_at.rfc3339
+  }
+  force = true
 }
 
 ##########
