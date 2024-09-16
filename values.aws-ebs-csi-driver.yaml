@@ -1,0 +1,29 @@
+---
+sidecars:
+  snapshotter:
+    forceEnable: true
+controller:
+  k8sTagClusterId: ${cluster_name}
+  region: ${region}
+  serviceAccount:
+    name: ebs-csi-controller-sa
+    automountServiceAccountToken: true
+    annotations:
+      eks.amazonaws.com/role-arn: "${iam_role_arn}"
+node:
+  serviceAccount:
+    name: ebs-csi-node-sa
+    automountServiceAccountToken: true
+    annotations:
+      eks.amazonaws.com/role-arn: "${iam_role_arn}"
+storageClasses:
+  - name: ebs-csi
+    annotations:
+      storageclass.kubernetes.io/is-default-class: "true"
+    volumeBindingMode: WaitForFirstConsumer
+    reclaimPolicy: Delete
+    parameters:
+      encrypted: "true"
+      kmsKeyId: "${kms_key_arn}"
+helmTester:
+  enabled: false

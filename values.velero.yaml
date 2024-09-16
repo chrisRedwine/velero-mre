@@ -1,0 +1,41 @@
+---
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.10.1
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+podSecurityContext:
+  fsGroup: 1337
+metrics:
+  enabled: false
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: ${bucket}
+      prefix: backups
+      validationFrequency: 1m
+      accessMode: ReadWrite
+      config:
+        region: ${region}
+        serverSideEncryption: AES256
+        checksumAlgorithm: ""
+        tagging: "${tagging}"
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: ${region}
+  features: EnableCSI
+credentials:
+  useSecret: false
+serviceAccount:
+  server:
+    name: velero-server
+    annotations:
+      eks.amazonaws.com/role-arn: "${iam_role_arn}"
+deployNodeAgent: true
+nodeAgent:
+  podSecurityContext:
+    fsGroup: 1337
